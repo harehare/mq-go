@@ -4,3 +4,4 @@
 *.dylib
 .mq
 
+.DS_Store
