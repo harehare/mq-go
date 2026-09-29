@@ -7,7 +7,7 @@ This package wraps the `mq-ffi` C library using cgo, providing a safe, idiomatic
 ## Requirements
 
 - Go 1.21+
-- `mq-ffi` C library installed on your system
+- Latest `mq-ffi` C library installed on your system, built with `cargo build --profile release-ffi` (not `--release`)
 
 ## Installation
 
@@ -56,7 +56,21 @@ markdown, err := mq.HTMLToMarkdownWithOptions(html, mq.ConversionOptions{
     UseTitleAsH1:               true,
     GenerateFrontMatter:        true,
     ExtractScriptsAsCodeBlocks: true,
+    BaseURL:                    "https://example.com", // resolves relative href/src
 })
+```
+
+### Engine configuration
+
+```go
+engine.SetMaxCallStackDepth(64)
+engine.SetSearchPaths([]string{"./modules"})
+engine.DefineStringValue("name", "world") // usable as `name` in queries
+
+err := engine.ImportModule("mymod")  // mymod::fn()
+err = engine.LoadModule("mymod")     // fn()
+
+mq.Version() // mq-ffi version
 ```
 
 ### Working with results

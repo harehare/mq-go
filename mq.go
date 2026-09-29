@@ -21,6 +21,7 @@ package mq
 /*
 #cgo LDFLAGS: -lmq_ffi
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdbool.h>
 
 typedef struct mq_result_t {
@@ -33,6 +34,7 @@ typedef struct MqConversionOptions {
     bool extract_scripts_as_code_blocks;
     bool generate_front_matter;
     bool use_title_as_h1;
+    const char *base_url;
 } MqConversionOptions;
 
 void *mq_create(void);
@@ -41,6 +43,12 @@ mq_result_t mq_eval(void *engine_ptr, const char *code_c, const char *input_c, c
 void mq_free_result(mq_result_t result);
 char *mq_html_to_markdown(const char *html_input_c, MqConversionOptions options, char **error_msg);
 void mq_free_string(char *s);
+const char *mq_version(void);
+void mq_set_max_call_stack_depth(void *engine_ptr, uint32_t max_call_stack_depth);
+void mq_set_search_paths(void *engine_ptr, const char *const *paths, uintptr_t paths_len);
+void mq_define_string_value(void *engine_ptr, const char *name_c, const char *value_c);
+char *mq_import_module(void *engine_ptr, const char *module_name_c);
+char *mq_load_module(void *engine_ptr, const char *module_name_c);
 */
 import "C"
 
@@ -72,6 +80,9 @@ type ConversionOptions struct {
 	GenerateFrontMatter bool
 	// UseTitleAsH1 uses the HTML title tag as an H1 heading.
 	UseTitleAsH1 bool
+	// BaseURL is the base URL used to resolve relative href/src values.
+	// When empty, the document's <base href> is used instead.
+	BaseURL string
 }
 
 // Result holds the output of an mq query evaluation.
@@ -136,6 +147,93 @@ func (e *Engine) Close() {
 	}
 }
 
+// SetMaxCallStackDepth sets the maximum call stack depth. No-op if closed.
+func (e *Engine) SetMaxCallStackDepth(depth uint32) {
+	if e.ptr == nil {
+		return
+	}
+	C.mq_set_max_call_stack_depth(e.ptr, C.uint32_t(depth))
+}
+
+// SetSearchPaths sets the module search paths. No-op if closed.
+func (e *Engine) SetSearchPaths(paths []string) {
+	if e.ptr == nil {
+		return
+	}
+	withCStringArray(paths, func(arr **C.char, n C.uintptr_t) {
+		C.mq_set_search_paths(e.ptr, arr, n)
+	})
+}
+
+// DefineStringValue defines a string variable referable from later queries. No-op if closed.
+func (e *Engine) DefineStringValue(name, value string) {
+	if e.ptr == nil {
+		return
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cValue := C.CString(value)
+	defer C.free(unsafe.Pointer(cValue))
+
+	C.mq_define_string_value(e.ptr, cName, cValue)
+}
+
+// ImportModule imports a module; definitions are namespaced (module::name).
+func (e *Engine) ImportModule(name string) error {
+	return e.moduleCall(name, func(p unsafe.Pointer, n *C.char) *C.char {
+		return C.mq_import_module(p, n)
+	})
+}
+
+// LoadModule loads a module; definitions go directly into the calling scope.
+func (e *Engine) LoadModule(name string) error {
+	return e.moduleCall(name, func(p unsafe.Pointer, n *C.char) *C.char {
+		return C.mq_load_module(p, n)
+	})
+}
+
+func (e *Engine) moduleCall(name string, call func(unsafe.Pointer, *C.char) *C.char) error {
+	if e.ptr == nil {
+		return errors.New("engine has been closed")
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	return takeError(call(e.ptr, cName))
+}
+
+// takeError converts a C error string (NULL on success) to an error and frees it.
+func takeError(msg *C.char) error {
+	if msg == nil {
+		return nil
+	}
+	defer C.mq_free_string(msg)
+	return errors.New(C.GoString(msg))
+}
+
+// withCStringArray calls fn with a C-allocated string array (cgo forbids Go memory holding Go pointers).
+func withCStringArray(items []string, fn func(arr **C.char, n C.uintptr_t)) {
+	if len(items) == 0 {
+		fn(nil, 0)
+		return
+	}
+
+	arr := (**C.char)(C.malloc(C.size_t(len(items)) * C.size_t(unsafe.Sizeof((*C.char)(nil)))))
+	defer C.free(unsafe.Pointer(arr))
+
+	slots := unsafe.Slice(arr, len(items))
+	for i, s := range items {
+		slots[i] = C.CString(s)
+	}
+	defer func() {
+		for _, p := range slots {
+			C.free(unsafe.Pointer(p))
+		}
+	}()
+
+	fn(arr, C.uintptr_t(len(items)))
+}
+
 // Run executes an mq query on the provided content using Markdown format.
 func (e *Engine) Run(code, content string) (*Result, error) {
 	return e.RunWithFormat(code, content, FormatMarkdown)
@@ -176,6 +274,11 @@ func (e *Engine) RunWithFormat(code, content string, format InputFormat) (*Resul
 	return &Result{values: values}, nil
 }
 
+// Version returns the version of the linked mq-ffi library.
+func Version() string {
+	return C.GoString(C.mq_version())
+}
+
 // HTMLToMarkdown converts HTML content to Markdown.
 func HTMLToMarkdown(htmlContent string) (string, error) {
 	return HTMLToMarkdownWithOptions(htmlContent, ConversionOptions{})
@@ -190,6 +293,11 @@ func HTMLToMarkdownWithOptions(htmlContent string, opts ConversionOptions) (stri
 		extract_scripts_as_code_blocks: C.bool(opts.ExtractScriptsAsCodeBlocks),
 		generate_front_matter:          C.bool(opts.GenerateFrontMatter),
 		use_title_as_h1:               C.bool(opts.UseTitleAsH1),
+	}
+	if opts.BaseURL != "" {
+		cBaseURL := C.CString(opts.BaseURL)
+		defer C.free(unsafe.Pointer(cBaseURL))
+		cOpts.base_url = cBaseURL
 	}
 
 	var cErrorMsg *C.char
